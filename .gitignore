@@ -2,3 +2,4 @@ bin
 .vs
 obj
 PublishProfiles
+/aws-lambda-tools-defaults.json

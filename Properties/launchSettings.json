@@ -1,0 +1,7 @@
+{
+  "profiles": {
+    "AWSRouter53": {
+      "commandName": "Project"
+    }
+  }
+}

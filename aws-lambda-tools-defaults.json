@@ -1,0 +1,23 @@
+
+{
+    "Information" : [
+        "This file provides default values for the deployment wizard inside Visual Studio and the AWS Lambda commands added to the .NET Core CLI.",
+        "To learn more about the Lambda commands with the .NET Core CLI execute the following command at the command line in the project root directory.",
+        "dotnet lambda help",
+        "All the command line options for the Lambda command can be specified in this file."
+    ],
+    "profile"     : "matthias.grzelak",
+    "region"      : "us-east-1",
+    "configuration" : "Debug",
+    "framework"     : "netcoreapp2.0",
+    "function-runtime" : "dotnetcore2.0",
+    "function-memory-size" : 256,
+    "function-timeout"     : 30,
+    "function-handler"     : "AWSRouter53::AWSRouter53.Function::FunctionHandler",
+    "function-name"        : "AWSRouter53",
+    "function-role"        : "arn:aws:iam::017964463726:role/LambdaAdmin",
+    "function-subnets"     : "subnet-c12fc38b,subnet-6ec8c80a,subnet-7ff9dc50,subnet-28ecda17,subnet-21f1ad1e",
+    "function-security-groups" : "sg-924381e4",
+    "tracing-mode"             : "Active",
+    "environment-variables"    : ""
+}

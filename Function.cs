@@ -31,6 +31,31 @@ namespace AWSRouter53
 
         public async Task FunctionHandler(ILambdaContext context)
         {
+            Console.WriteLine($"*** Handler START ***");
+            var maxTime = 60 * 1000;
+            var rateLimit = 20 * 1000;
+            var sw = Stopwatch.StartNew();
+            long remaining = 0;
+            do
+            {
+                Console.WriteLine($"New Execution Started, currently elpased: {sw.ElapsedMilliseconds}");
+                var elapsed = await Execute(context);
+                var rateAwait = rateLimit - elapsed;
+
+                remaining = maxTime - (sw.ElapsedMilliseconds + Math.Max(rateLimit, 2 * elapsed) + 1000);
+
+                if (rateAwait > 0 && remaining > 0)
+                {
+                    Console.WriteLine($"Rate Limit Awaiting {rateAwait} [ms] remaining out of {rateLimit} [ms]. Total elapsed: {sw.ElapsedMilliseconds} [ms]");
+                    await Task.Delay((int)rateAwait);
+                }
+            } while (remaining > 0);
+
+            Console.WriteLine($"*** Handler END ***");
+        }
+
+        public async Task<long> Execute(ILambdaContext context)
+        {
             var sw = Stopwatch.StartNew();
             context.Logger.Log($"{context?.FunctionName} => {nameof(FunctionHandler)} => Started");
 
@@ -44,12 +69,48 @@ namespace AWSRouter53
                 var instances = await t1;
                 var zones = await t2;
 
+                //Select Instances with Route Tag Key Only
+                instances = instances.Where(instance => instance.Tags.Any(x => x.Key.Contains("Route53 Name"))).ToArray();
+
+                var running = instances.Where(instance => instance.State.Code == 16);//running
+                var not_running = instances.Where(instance => instance.State.Code != 16);//running
+
+                var blacklist = new List<string>();
+                //only process running instances if there are stopped ones with the same 'Route53 Name'
+                if (!running.IsNullOrEmpty() && !not_running.IsNullOrEmpty())
+                {
+                    foreach (var live in running)
+                    {
+                        var names_live = live.Tags.Where(x => x.Key.Contains("Route53 Name") && !x.Value.IsNullOrEmpty()).Select(x => x.Value);
+                        var zones_live = live.Tags.Where(x => x.Key.Contains("Route53 Zone") && !x.Value.IsNullOrEmpty()).Select(x => x.Value);
+
+                        foreach (var stopped in running)
+                        {
+                            if (blacklist.Contains(stopped.InstanceId)) 
+                                continue; //dont process blacklisted instances
+
+                            var names_stopped = stopped.Tags.Where(x => x.Key.Contains("Route53 Name") && !x.Value.IsNullOrEmpty()).Select(x => x.Value);
+                            var zones_stopped = stopped.Tags.Where(x => x.Key.Contains("Route53 Zone") && !x.Value.IsNullOrEmpty()).Select(x => x.Value);
+
+                            if (names_live.IntersectAny(names_stopped) && zones_live.IntersectAny(zones_stopped))
+                            {
+                                Console.WriteLine($"Blacklisting instance '{stopped.InstanceId}' from processing, found overlapping zones and names with already running instance '{live.InstanceId}'.");
+                                blacklist.Add(stopped.InstanceId);
+                            }
+                        }
+                    }
+                }
+
+                //Select Non blacklisted instances
+                instances = instances.Where(instance => !blacklist.Contains(instance.InstanceId)).ToArray();
+
                 if (zones.Count <= 0)
                     context.Logger.Log($"AWSRouter53 can't process any tags, not a single Route53 Zone was found.");
                 else
                     context.Logger.Log($"Processing validating routes for {zones.Count} zones and {instances.Length} instances...");
 
                 await ParallelEx.ForEachAsync(instances, async instance => await Process(zones, instance, context.Logger));
+                return sw.ElapsedMilliseconds;
             }
             finally
             {
@@ -59,9 +120,6 @@ namespace AWSRouter53
 
         public async Task Process(Dictionary<HostedZone, ResourceRecordSet[]> zones, Amazon.EC2.Model.Instance instance, ILambdaLogger logger)
         {
-            if (!instance.Tags.Any(x => x.Key.Contains("Route53")))
-                return;
-
             logger.Log($"Processing and Veryfying Route53 Recors for EC2 Instance {instance.InstanceId}, Name: {instance.GetTagValueOrDefault("Name")}");
 
             var disableAll = instance.GetTagValueOrDefault("Route53 Disable All").ToBoolOrDefault(false);
@@ -100,7 +158,9 @@ namespace AWSRouter53
                     //for whatever reason those names end with dot once they are saved...
                     var record = zone.Value.FirstOrDefault(r => r.Name.Equals($"{recordName}.", StringComparison.InvariantCultureIgnoreCase));
 
-                    await ProcessRecord(zoneId, record, instance, enabled, recordName, ttl, address, logger);
+                    var ex = await ProcessRecord(zoneId, record, instance, enabled, recordName, ttl, address, logger).CatchExceptionAsync();
+                    if (ex != null)
+                        logger.Log($"Failed during Update or Validation of Route53 record for EC2 Instance {instance.InstanceId} ({instance.GetTagValueOrDefault("Name")}), ZoneId: {zoneId}, Name: {name}, Old Record Name: {record?.Name}, Enable: {enabled}, TTL: {ttl}, Address: {address}, Error: {ex.JsonSerializeAsPrettyException()}");
                 }
             });
 
@@ -114,41 +174,37 @@ namespace AWSRouter53
             string address,
             ILambdaLogger logger)
         {
-            try
+            if (!enabled)
             {
-                if (!enabled)
+                if (record == null)
                 {
-                    if (record == null)
-                    {
-                        logger.Log($"No need to destroy, record '{name}' does not exists. Tags Origin: EC2 Instance {instance.InstanceId} ({instance.GetTagValueOrDefault("Name")})");
-                        return; //no need to update, record does not exist
-                    }
-                    else
-                    {
-                        logger.Log($"Destroying record {record.Name} linked to EC2 Instance {instance.InstanceId} ({instance.GetTagValueOrDefault("Name")})...");
-                        await _R53.DestroyRecord(zoneId, record.Name, record.Type);
-                    }
+                    logger.Log($"No need to destroy, record '{name}' does not exists for zone '{zoneId}'. Tags Origin: EC2 Instance {instance.InstanceId} ({instance.GetTagValueOrDefault("Name")})");
+                    return; //no need to update, record does not exist
                 }
                 else
                 {
-                    if (
-                        record?.Type == RRType.A &&
-                        record?.ResourceRecords.Any(r => r.Value == address) == true &&
-                        record?.TTL == ttl)
-                    {
-                        logger.Log($"Correct record already exists for EC2 Instance {instance.InstanceId} ({instance.GetTagValueOrDefault("Name")})");
-                        return; //no need to update, correct record already exists
-                    }
-
-                    logger.Log($"Updating record of EC2 Instance {instance.InstanceId} ({instance.GetTagValueOrDefault("Name")}), Old Record Name: '{record?.Name}'...");
-                    await _R53.UpsertRecord(zoneId: zoneId, Name: name, Value: address,
-                        Type: RRType.A, TTL: ttl);
+                    logger.Log($"Destroying record {record.Name} linked to EC2 Instance {instance.InstanceId} ({instance.GetTagValueOrDefault("Name")})...");
+                    await _R53.DestroyRecord(zoneId, record.Name, record.Type);
                 }
+
+                return;
             }
-            catch (Exception ex)
+
+            if (record?.Type == RRType.A &&
+                record?.ResourceRecords.Any(r => r.Value == address) == true &&
+                record?.TTL == ttl)
             {
-                logger.Log($"Failed during Update or Validation of Route53 record for EC2 Instance {instance.InstanceId} ({instance.GetTagValueOrDefault("Name")}), ZoneId: {zoneId}, Name: {name}, Old Record Name: {record?.Name}, Enable: {enabled}, TTL: {ttl}, Address: {address}, Error: {ex.JsonSerializeAsPrettyException()}");
+                logger.Log($"Correct record already exists for EC2 Instance {instance.InstanceId} ({instance.GetTagValueOrDefault("Name")})");
+                return; //no need to update, correct record already exists
             }
+
+            logger.Log($"Updating record of EC2 Instance {instance.InstanceId} ({instance.GetTagValueOrDefault("Name")}), Old Record Name: '{record?.Name}'...");
+            await _R53.UpsertRecordAsync(
+                zoneId: zoneId,
+                Name: name,
+                Value: address,
+                Type: RRType.A,
+                TTL: ttl);
         }
     }
 }

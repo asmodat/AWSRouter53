@@ -61,19 +61,11 @@ namespace AWSRouter53
 
             try
             {
-                var t1 = _EC2.ListInstances();
-                var t2 = _R53.GetRecordSets();
-
-                await Task.WhenAll(t1, t2);
-
-                var instances = await t1;
-                var zones = await t2;
-
                 //Select Instances with Route Tag Key Only
-                instances = instances.Where(instance => instance.Tags.Any(x => x.Key.Contains("Route53 Name"))).ToArray();
+                var instances = (await _EC2.ListInstances()).Where(instance => instance.Tags.Any(x => x.Key.Contains("Route53 Name"))).ToArray();
 
                 var running = instances.Where(instance => instance.State.Code == 16);//running
-                var not_running = instances.Where(instance => instance.State.Code != 16);//running
+                var not_running = instances.Where(instance => instance.State.Code != 16);//not running
 
                 var blacklist = new List<string>();
                 //only process running instances if there are stopped ones with the same 'Route53 Name'
@@ -84,10 +76,10 @@ namespace AWSRouter53
                         var names_live = live.Tags.Where(x => x.Key.Contains("Route53 Name") && !x.Value.IsNullOrEmpty()).Select(x => x.Value);
                         var zones_live = live.Tags.Where(x => x.Key.Contains("Route53 Zone") && !x.Value.IsNullOrEmpty()).Select(x => x.Value);
 
-                        foreach (var stopped in running)
+                        foreach (var stopped in not_running)
                         {
-                            if (blacklist.Contains(stopped.InstanceId)) 
-                                continue; //dont process blacklisted instances
+                            if (blacklist.Contains(stopped.InstanceId) || live.InstanceId == stopped.InstanceId) 
+                                continue; //dont process already blacklisted instances or the same instances
 
                             var names_stopped = stopped.Tags.Where(x => x.Key.Contains("Route53 Name") && !x.Value.IsNullOrEmpty()).Select(x => x.Value);
                             var zones_stopped = stopped.Tags.Where(x => x.Key.Contains("Route53 Zone") && !x.Value.IsNullOrEmpty()).Select(x => x.Value);
@@ -103,6 +95,8 @@ namespace AWSRouter53
 
                 //Select Non blacklisted instances
                 instances = instances.Where(instance => !blacklist.Contains(instance.InstanceId)).ToArray();
+
+                var zones = await _R53.GetRecordSets();
 
                 if (zones.Count <= 0)
                     context.Logger.Log($"AWSRouter53 can't process any tags, not a single Route53 Zone was found.");

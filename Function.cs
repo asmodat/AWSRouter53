@@ -22,7 +22,7 @@ namespace AWSRouter53
         private Route53Helper _R53;
         private ILambdaContext _context;
         private ILambdaLogger _logger;
-        private bool _verbose;
+        private bool _verbose = true;
 
         private void Log(string msg)
         {
@@ -40,13 +40,13 @@ namespace AWSRouter53
 
         public async Task FunctionHandler(ILambdaContext context)
         {
+            _context = context;
+            _logger = _context.Logger;
             _logger.Log($"{context?.FunctionName} => {nameof(FunctionHandler)} => Started");
             _verbose = Environment.GetEnvironmentVariable("verbose").ToBoolOrDefault(true);
             var maxTime = 60 * 1000;
             var rateLimit = 20 * 1000;
             var sw = Stopwatch.StartNew();
-            _context = context;
-            _logger = context.Logger;
 
             long remaining = 0;
             do
